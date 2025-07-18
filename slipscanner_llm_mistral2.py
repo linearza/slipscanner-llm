@@ -39,48 +39,64 @@ Output:
 }
 
 selected_template_name = "Default (Receipt Parser)"
-ocr_text_global = ""
 last_ocr_text = None
 generated_df = None
-
 last_prompt = None  # tracks the last full prompt sent to LLM
 
 
-def generate_csv_workflow():
+def select_receipt_image():
+    global last_ocr_text, last_prompt
     file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png")])
     if not file_path:
         chat_log.insert(tk.END, "[System] No image selected.\n", "system")
-        return
+        return False
 
     chat_log.insert(tk.END, "[System] Running OCR...\n", "system")
-    global last_ocr_text
     last_ocr_text = extract_text_from_image(file_path)
-    text = last_ocr_text
+    if not last_ocr_text.strip():
+        messagebox.showerror("OCR Error", "No text was extracted from the selected image.")
+        last_ocr_text = None
+        return False
 
-    # OCR Window
+    # Reset last prompt since new OCR text
+    last_prompt = PROMPT_TEMPLATES[selected_template_name].replace("{text}", last_ocr_text)
+
+    # Show OCR Text window
     ocr_window = tk.Toplevel(app)
     ocr_window.title("OCR Result")
     ocr_window.geometry("600x400")
     ocr_text_widget = tk.Text(ocr_window, wrap=tk.WORD)
     ocr_text_widget.pack(expand=True, fill=tk.BOTH)
-    ocr_text_widget.insert(tk.END, text)
+    ocr_text_widget.insert(tk.END, last_ocr_text)
     ocr_text_widget.config(state=tk.DISABLED)
     tk.Button(ocr_window, text="Close", command=ocr_window.destroy).pack(pady=5)
 
-    # prompt = PROMPT_TEMPLATES[selected_template_name].replace("{text}", text)
-    prompt = PROMPT_TEMPLATES[selected_template_name].replace("{text}", text)
-    global last_prompt
-    last_prompt = prompt
-
-    # Prompt Window
+    # Show Prompt window
     prompt_window = tk.Toplevel(app)
     prompt_window.title("Prompt Sent to LLM")
     prompt_window.geometry("600x400")
     prompt_text_widget = tk.Text(prompt_window, wrap=tk.WORD)
     prompt_text_widget.pack(expand=True, fill=tk.BOTH)
-    prompt_text_widget.insert(tk.END, prompt)
+    prompt_text_widget.insert(tk.END, last_prompt)
     prompt_text_widget.config(state=tk.DISABLED)
     tk.Button(prompt_window, text="Close", command=prompt_window.destroy).pack(pady=5)
+
+    # Enable buttons now
+    generate_button.config(state=tk.NORMAL)
+    refine_button.config(state=tk.NORMAL)
+    export_button.config(state=tk.DISABLED)  # no CSV generated yet
+
+    return True
+
+
+def generate_csv_workflow():
+    global last_ocr_text, last_prompt, generated_df
+    if not last_ocr_text:
+        if not select_receipt_image():
+            return
+
+    prompt = last_prompt
+    set_ui_state(True)
 
     def threaded_call():
         try:
@@ -90,7 +106,6 @@ def generate_csv_workflow():
             if not parsed:
                 return
 
-            global generated_df
             generated_df = pd.DataFrame([[item.get("description", ""), "", "", item.get("price", 0)] for item in parsed],
                                         columns=["description", "category", "units", "price"])
 
@@ -101,14 +116,13 @@ def generate_csv_workflow():
         finally:
             set_ui_state(False)
 
-    set_ui_state(True)
     threading.Thread(target=threaded_call, daemon=True).start()
 
-def refine_prompt_and_regenerate():
-    global last_ocr_text, last_prompt
 
-    if not last_prompt or not last_ocr_text:
-        messagebox.showinfo("Info", "You must generate results first before refining.")
+def refine_prompt_and_regenerate():
+    global last_ocr_text, last_prompt, generated_df
+    if not last_ocr_text or not last_prompt:
+        messagebox.showinfo("Info", "Please select an image and generate results first before refining.")
         return
 
     user_refinement = prompt_entry.get("1.0", tk.END).strip()
@@ -121,7 +135,8 @@ def refine_prompt_and_regenerate():
     set_ui_state(True)
 
     def run_refinement():
-        global last_prompt
+        global last_prompt, generated_df
+
         try:
             # Ask the LLM to merge the prompts intelligently
             merge_request = f"""You are an AI prompt engineer. Merge the following prompts into one effective prompt that improves the receipt parsing task. Keep formatting intact.
@@ -153,7 +168,6 @@ Respond ONLY with the merged prompt text."""
             chat_log.insert(tk.END, f"[LLM - refined]:\n{response}\n", "llm")
             parsed = safe_json_parse(response)
             if parsed:
-                global generated_df
                 generated_df = pd.DataFrame([[item.get("description", ""), "", "", item.get("price", 0)] for item in parsed],
                                             columns=["description", "category", "units", "price"])
                 csv_preview = generated_df.to_csv(index=False)
@@ -176,6 +190,7 @@ def extract_text_from_image(image_path):
         messagebox.showerror("OCR Error", f"Failed to extract text from image:\n{e}")
         return ""
 
+
 # --- JSON Parse ---
 def safe_json_parse(response):
     try:
@@ -190,8 +205,10 @@ def safe_json_parse(response):
         messagebox.showerror("Parse Error", f"Could not decode LLM output:\n{e}\n\nRaw output:\n{response}")
         return []
 
+
 # --- LLM Interaction ---
 SYSTEM_PROMPT = """You are an assistant for parsing receipts. If the user says things like 'generate the CSV', respond with __COMMAND__:generate_csv. Otherwise, answer naturally."""
+
 
 def call_ollama(prompt, model="mistral"):
     try:
@@ -210,10 +227,12 @@ def call_ollama(prompt, model="mistral"):
         messagebox.showerror("LLM Error", f"Failed to call Ollama:\n{e}")
         return ""
 
+
 def set_ui_state(disabled=True):
     state = tk.DISABLED if disabled else tk.NORMAL
     for child in button_frame.winfo_children():
         child.config(state=state)
+
 
 def send_prompt():
     prompt = prompt_entry.get("1.0", tk.END).strip()
@@ -237,6 +256,7 @@ def send_prompt():
 
     threading.Thread(target=run_llm, daemon=True).start()
 
+
 def export_generated_csv():
     global generated_df
     if generated_df is None:
@@ -256,6 +276,7 @@ def export_generated_csv():
     except Exception as e:
         messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
 
+
 # --- GUI Layout ---
 app = tk.Tk()
 app.title("LLM Receipt Chat Interface")
@@ -271,22 +292,27 @@ chat_log.tag_config("error", foreground="red")
 prompt_entry = scrolledtext.ScrolledText(app, height=6)
 prompt_entry.pack(padx=10, pady=(0, 10), fill=tk.X)
 
+
 def handle_cmd_enter(event):
     send_prompt()
     return "break"
+
 
 prompt_entry.bind("<Command-Return>", handle_cmd_enter)
 
 button_frame = tk.Frame(app)
 button_frame.pack(pady=5)
 
-tk.Button(button_frame, text="Generate CSV", command=generate_csv_workflow).pack(side=tk.LEFT, padx=5)
+generate_button = tk.Button(button_frame, text="Generate CSV", command=generate_csv_workflow)
+generate_button.pack(side=tk.LEFT, padx=5)
+generate_button.config(state=tk.NORMAL)  # Allow generate button, but it checks for OCR internally
 
 export_button = tk.Button(button_frame, text="Export CSV", command=export_generated_csv)
 export_button.pack(side=tk.LEFT, padx=5)
 export_button.config(state=tk.DISABLED)
 
-tk.Button(button_frame, text="Refine Prompt", command=refine_prompt_and_regenerate).pack(side=tk.LEFT, padx=5)
-
+refine_button = tk.Button(button_frame, text="Refine Prompt", command=refine_prompt_and_regenerate)
+refine_button.pack(side=tk.LEFT, padx=5)
+refine_button.config(state=tk.DISABLED)  # Disabled until OCR text ready
 
 app.mainloop()
