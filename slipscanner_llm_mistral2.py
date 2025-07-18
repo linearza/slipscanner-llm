@@ -21,6 +21,7 @@ Each item should have: description, price (as float).
 There could be multiple items with the same values, don't try to merge them.
 Ensure that the final line item count matches the original count.
 Where possible, complete truncated words, such as "tyaki" to "Teriyaki" and "Chick" to "Chicken"
+Be mindful of secondary lines which output auxillary information like weights and variants - I am only concerned with the description and price.
 Output ONLY a valid JSON array of objects, e.g.:
 
 [
@@ -70,6 +71,19 @@ def generate_csv_workflow():
 
     prompt = PROMPT_TEMPLATES["Default (Receipt Parser)"].replace("{text}", text)
 
+    # Create new window to display the full prompt
+    prompt_window = tk.Toplevel(app)
+    prompt_window.title("Prompt Sent to LLM")
+    prompt_window.geometry("600x400")
+
+    prompt_text_widget = tk.Text(prompt_window, wrap=tk.WORD)
+    prompt_text_widget.pack(expand=True, fill=tk.BOTH)
+    prompt_text_widget.insert(tk.END, prompt)
+    prompt_text_widget.config(state=tk.DISABLED)  # make it read-only
+
+    close_prompt_btn = tk.Button(prompt_window, text="Close", command=prompt_window.destroy)
+    close_prompt_btn.pack(pady=5)
+
     def threaded_call():
         try:
             response = call_ollama(prompt)
@@ -78,17 +92,18 @@ def generate_csv_workflow():
             if not parsed:
                 return
 
+            # Create DataFrame and store it globally
+            global generated_df
+            generated_df = pd.DataFrame([[item.get("description", ""), "", "", item.get("price", 0)] for item in parsed],
+                                        columns=["description", "category", "units", "price"])
 
-            save_path = filedialog.asksaveasfilename(defaultextension=".csv",
-                                                     filetypes=[("CSV files", "*.csv")],
-                                                     initialfile="receipt_output.csv")
-            if not save_path:
-                return
+            # Display CSV result in chat
+            csv_preview = generated_df.to_csv(index=False)
+            chat_log.insert(tk.END, f"[CSV Preview]:\n{csv_preview}\n", "llm")
 
-            df = pd.DataFrame([[item.get("description", ""), "", "", item.get("price", 0)] for item in parsed],
-                              columns=["description", "category", "units", "price"])
-            df.to_csv(save_path, index=False)
-            chat_log.insert(tk.END, f"[System] CSV saved to:\n{save_path}\n", "system")
+            # Enable export button
+            export_button.config(state=tk.NORMAL)
+
         finally:
             set_ui_state(False)
 
@@ -285,6 +300,25 @@ def regenerate_from_prompt():
 
     threading.Thread(target=threaded_call, daemon=True).start()
 
+def export_generated_csv():
+    global generated_df
+    if generated_df is None:
+        messagebox.showwarning("Export Error", "No CSV data available to export.")
+        return
+
+    save_path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                             filetypes=[("CSV files", "*.csv")],
+                                             initialfile="receipt_output.csv")
+    if not save_path:
+        return
+
+    try:
+        generated_df.to_csv(save_path, index=False)
+        messagebox.showinfo("Success", f"CSV saved:\n{save_path}")
+        chat_log.insert(tk.END, f"[System] CSV exported to:\n{save_path}\n", "system")
+    except Exception as e:
+        messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
+
 
 # --- GUI Layout ---
 app = tk.Tk()
@@ -317,7 +351,11 @@ button_frame.pack(pady=5)
 # tk.Button(button_frame, text="Insert OCR Text", command=insert_ocr_text).pack(side=tk.LEFT, padx=5)
 # tk.Button(button_frame, text="Send to LLM", command=send_prompt).pack(side=tk.LEFT, padx=5)
 # tk.Button(button_frame, text="Export CSV", command=export_to_csv).pack(side=tk.LEFT, padx=5)
-tk.Button(button_frame, text="Regenerate", command=regenerate_from_prompt).pack(side=tk.LEFT, padx=5)
+# tk.Button(button_frame, text="Regenerate", command=regenerate_from_prompt).pack(side=tk.LEFT, padx=5)
+# tk.Button(button_frame, text="Regenerate", command=regenerate_from_prompt).pack(side=tk.LEFT, padx=5)
 
+export_button = tk.Button(button_frame, text="Export CSV", command=export_generated_csv)
+export_button.pack(side=tk.LEFT, padx=5)
+export_button.config(state=tk.DISABLED)  # Disabled until LLM finishes
 
 app.mainloop()
