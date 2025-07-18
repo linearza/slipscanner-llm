@@ -43,6 +43,9 @@ ocr_text_global = ""
 last_ocr_text = None
 generated_df = None
 
+last_prompt = None  # tracks the last full prompt sent to LLM
+
+
 def generate_csv_workflow():
     file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png")])
     if not file_path:
@@ -64,7 +67,10 @@ def generate_csv_workflow():
     ocr_text_widget.config(state=tk.DISABLED)
     tk.Button(ocr_window, text="Close", command=ocr_window.destroy).pack(pady=5)
 
+    # prompt = PROMPT_TEMPLATES[selected_template_name].replace("{text}", text)
     prompt = PROMPT_TEMPLATES[selected_template_name].replace("{text}", text)
+    global last_prompt
+    last_prompt = prompt
 
     # Prompt Window
     prompt_window = tk.Toplevel(app)
@@ -97,6 +103,68 @@ def generate_csv_workflow():
 
     set_ui_state(True)
     threading.Thread(target=threaded_call, daemon=True).start()
+
+def refine_prompt_and_regenerate():
+    global last_ocr_text, last_prompt
+
+    if not last_prompt or not last_ocr_text:
+        messagebox.showinfo("Info", "You must generate results first before refining.")
+        return
+
+    user_refinement = prompt_entry.get("1.0", tk.END).strip()
+    if not user_refinement:
+        messagebox.showwarning("Missing Input", "Please enter a refinement prompt.")
+        return
+
+    chat_log.insert(tk.END, f"\n[You - refinement]:\n{user_refinement}\n", "user")
+    chat_log.insert(tk.END, "[System] Generating a merged prompt...\n", "system")
+    set_ui_state(True)
+
+    def run_refinement():
+        global last_prompt
+        try:
+            # Ask the LLM to merge the prompts intelligently
+            merge_request = f"""You are an AI prompt engineer. Merge the following prompts into one effective prompt that improves the receipt parsing task. Keep formatting intact.
+
+Previous Prompt:
+{last_prompt}
+
+Refinement Instructions:
+{user_refinement}
+
+Respond ONLY with the merged prompt text."""
+            merged_prompt = call_ollama(merge_request)
+
+            # Show merged prompt in new window
+            merged_window = tk.Toplevel(app)
+            merged_window.title("Merged Prompt")
+            merged_window.geometry("600x400")
+            merged_widget = tk.Text(merged_window, wrap=tk.WORD)
+            merged_widget.pack(expand=True, fill=tk.BOTH)
+            merged_widget.insert(tk.END, merged_prompt)
+            merged_widget.config(state=tk.DISABLED)
+            tk.Button(merged_window, text="Close", command=merged_window.destroy).pack(pady=5)
+
+            # Save it for future refinements
+            last_prompt = merged_prompt
+
+            # Now use it to regenerate results
+            response = call_ollama(merged_prompt)
+            chat_log.insert(tk.END, f"[LLM - refined]:\n{response}\n", "llm")
+            parsed = safe_json_parse(response)
+            if parsed:
+                global generated_df
+                generated_df = pd.DataFrame([[item.get("description", ""), "", "", item.get("price", 0)] for item in parsed],
+                                            columns=["description", "category", "units", "price"])
+                csv_preview = generated_df.to_csv(index=False)
+                chat_log.insert(tk.END, f"[CSV Preview]:\n{csv_preview}\n", "llm")
+                export_button.config(state=tk.NORMAL)
+
+        finally:
+            set_ui_state(False)
+            chat_log.see(tk.END)
+
+    threading.Thread(target=run_refinement, daemon=True).start()
 
 
 # --- OCR Extraction ---
@@ -217,5 +285,8 @@ tk.Button(button_frame, text="Generate CSV", command=generate_csv_workflow).pack
 export_button = tk.Button(button_frame, text="Export CSV", command=export_generated_csv)
 export_button.pack(side=tk.LEFT, padx=5)
 export_button.config(state=tk.DISABLED)
+
+tk.Button(button_frame, text="Refine Prompt", command=refine_prompt_and_regenerate).pack(side=tk.LEFT, padx=5)
+
 
 app.mainloop()
