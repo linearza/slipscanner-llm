@@ -16,11 +16,19 @@ PROMPT_TEMPLATES = {
     "Default (Receipt Parser)": """
 You are a receipt parser. The input text is from pytesseract OCR scanner.
 The receipt likely contains logos and shop information which you can ignore, isolate the line item section first.
-Cleanup and extract line items from the text below. Output as JSON array.
+Cleanup and extract line items from the text below.
 Each item should have: description, price (as float).
 There could be multiple items with the same values, don't try to merge them.
 Ensure that the final line item count matches the original count.
 Where possible, complete truncated words, such as "tyaki" to "Teriyaki" and "Chick" to "Chicken"
+Output ONLY a valid JSON array of objects, e.g.:
+
+[
+  {"description": "item 1", "price": 9.99},
+  {"description": "item 2", "price": 5.50}
+]
+
+Do NOT output any extra text, comments, or markdown formatting.
 
 Text:
 {text}
@@ -31,6 +39,8 @@ Output:
 
 selected_template_name = "Default (Receipt Parser)"
 ocr_text_global = ""
+last_ocr_text = None  # Stores latest OCR result
+
 
 def generate_csv_workflow():
     file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png")])
@@ -39,7 +49,24 @@ def generate_csv_workflow():
         return
 
     chat_log.insert(tk.END, "[System] Running OCR...\n", "system")
-    text = extract_text_from_image(file_path)
+    # text = extract_text_from_image(file_path)
+    global last_ocr_text
+    last_ocr_text = extract_text_from_image(file_path)
+    text = last_ocr_text
+
+    # Create new window to display OCR result
+    ocr_window = tk.Toplevel(app)
+    ocr_window.title("OCR Result")
+    ocr_window.geometry("600x400")
+
+    ocr_text_widget = tk.Text(ocr_window, wrap=tk.WORD)
+    ocr_text_widget.pack(expand=True, fill=tk.BOTH)
+    ocr_text_widget.insert(tk.END, text)
+    ocr_text_widget.config(state=tk.DISABLED)  # make it read-only
+
+    # Optional: Add a close button
+    close_btn = tk.Button(ocr_window, text="Close", command=ocr_window.destroy)
+    close_btn.pack(pady=5)
 
     prompt = PROMPT_TEMPLATES["Default (Receipt Parser)"].replace("{text}", text)
 
@@ -50,6 +77,7 @@ def generate_csv_workflow():
             parsed = safe_json_parse(response)
             if not parsed:
                 return
+
 
             save_path = filedialog.asksaveasfilename(defaultextension=".csv",
                                                      filetypes=[("CSV files", "*.csv")],
@@ -145,6 +173,33 @@ def select_receipt_image():
     chat_log.insert(tk.END, "\n[System] OCR text inserted into prompt.\n")
     chat_log.see(tk.END)
 
+
+# def select_receipt_image():
+#     global ocr_text_global
+#     file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png")])
+#     if not file_path:
+#         return
+#     ocr_text_global = extract_text_from_image(file_path)
+#     if not ocr_text_global:
+#         return
+
+#     # Create new window to display OCR result
+#     ocr_window = tk.Toplevel(app)
+#     ocr_window.title("OCR Result")
+#     ocr_window.geometry("600x400")
+
+#     ocr_text_widget = tk.Text(ocr_window, wrap=tk.WORD)
+#     ocr_text_widget.pack(expand=True, fill=tk.BOTH)
+#     ocr_text_widget.insert(tk.END, ocr_text_global)
+#     ocr_text_widget.config(state=tk.DISABLED)  # make it read-only
+
+#     # Optional: Add a close button
+#     close_btn = tk.Button(ocr_window, text="Close", command=ocr_window.destroy)
+#     close_btn.pack(pady=5)
+
+#     chat_log.insert(tk.END, "\n[System] OCR text shown in a separate window.\n")
+#     chat_log.see(tk.END)
+
 def set_ui_state(disabled=True):
     state = tk.DISABLED if disabled else tk.NORMAL
     for child in button_frame.winfo_children():
@@ -192,6 +247,45 @@ def export_to_csv():
     df.to_csv(save_path, index=False)
     messagebox.showinfo("Success", f"CSV saved:\n{save_path}")
 
+def regenerate_from_prompt():
+    global last_ocr_text
+
+    if not last_ocr_text:
+        chat_log.insert(tk.END, "[System] No OCR text available. Please run 'Generate CSV' first.\n", "system")
+        return
+
+    prompt_template = prompt_entry.get("1.0", tk.END).strip()
+    if not prompt_template:
+        chat_log.insert(tk.END, "[System] Prompt is empty.\n", "system")
+        return
+
+    prompt = prompt_template.replace("{text}", last_ocr_text)
+
+    chat_log.insert(tk.END, "[System] Regenerating based on modified prompt...\n", "system")
+    chat_log.see(tk.END)
+    set_ui_state(True)
+
+    def threaded_call():
+        try:
+            response = call_ollama(prompt)
+            chat_log.insert(tk.END, f"[LLM]:\n{response}\n", "llm")
+
+            parsed = safe_json_parse(response)
+            if parsed:
+                save_path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                         filetypes=[("CSV files", "*.csv")],
+                                                         initialfile="receipt_output.csv")
+                if save_path:
+                    df = pd.DataFrame([[item.get("description", ""), "", "", item.get("price", 0)] for item in parsed],
+                                      columns=["description", "category", "units", "price"])
+                    df.to_csv(save_path, index=False)
+                    chat_log.insert(tk.END, f"[System] CSV saved to:\n{save_path}\n", "system")
+        finally:
+            set_ui_state(False)
+
+    threading.Thread(target=threaded_call, daemon=True).start()
+
+
 # --- GUI Layout ---
 app = tk.Tk()
 app.title("LLM Receipt Chat Interface")
@@ -219,9 +313,11 @@ prompt_entry.bind("<Command-Return>", handle_cmd_enter)
 button_frame = tk.Frame(app)
 button_frame.pack(pady=5)
 
-tk.Button(button_frame, text="Select Receipt Image", command=select_receipt_image).pack(side=tk.LEFT, padx=5)
-tk.Button(button_frame, text="Insert OCR Text", command=insert_ocr_text).pack(side=tk.LEFT, padx=5)
-tk.Button(button_frame, text="Send to LLM", command=send_prompt).pack(side=tk.LEFT, padx=5)
-tk.Button(button_frame, text="Export CSV", command=export_to_csv).pack(side=tk.LEFT, padx=5)
+# tk.Button(button_frame, text="Select Receipt Image", command=select_receipt_image).pack(side=tk.LEFT, padx=5)
+# tk.Button(button_frame, text="Insert OCR Text", command=insert_ocr_text).pack(side=tk.LEFT, padx=5)
+# tk.Button(button_frame, text="Send to LLM", command=send_prompt).pack(side=tk.LEFT, padx=5)
+# tk.Button(button_frame, text="Export CSV", command=export_to_csv).pack(side=tk.LEFT, padx=5)
+tk.Button(button_frame, text="Regenerate", command=regenerate_from_prompt).pack(side=tk.LEFT, padx=5)
+
 
 app.mainloop()
